@@ -6,7 +6,6 @@ __author__ = 'Morteza Zakeri'
 __version__ = '0.5.2'
 
 import datetime
-import os
 import subprocess
 from multiprocessing.dummy import Pool, Process, Manager
 
@@ -16,14 +15,13 @@ from joblib import Parallel, delayed
 
 import sys
 import os
-os.add_dll_directory("C:\\Program Files\\SciTools\\bin\\pc-win64\\")
-sys.path.append("C:\\Program Files\\SciTools\\bin\\pc-win64\\python")
+sys.path.append("/Applications/Understand.app/Contents/MacOS/Python")
 import understand as und
 
 
-#from java8speedy.parser import sa_javalabeled
+from gen import sa_javalabeled
 
-from codart import config
+import config
 
 
 def git_restore(project_dir):
