@@ -20,10 +20,10 @@ from antlr4.tree import Tree
 from antlr4 import FileStream, ParseTreeWalker, CommonTokenStream
 from antlr4.TokenStreamRewriter import TokenStreamRewriter
 
-from utility.directory_utils import create_project_parse_tree
-from gen.JavaParserLabeled import JavaParserLabeled as JavaParser
-from gen.JavaParserLabeledListener import JavaParserLabeledListener as JavaParserListener
-from gen.JavaLexer import JavaLexer
+from codart.utility.directory_utils import create_project_parse_tree
+from codart.gen.JavaParser import JavaParser
+from codart.gen.JavaParserListener import JavaParserListener
+from codart.gen.JavaLexer import JavaLexer
 
 
 class Program:
