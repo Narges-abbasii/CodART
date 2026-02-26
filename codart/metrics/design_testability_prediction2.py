@@ -23,11 +23,15 @@ __version__ = '0.2.3'
 __author__ = 'Morteza Zakeri'
 
 import os
+import sys
+import gc
+
 import pandas as pd
 import joblib
 from joblib import Parallel, delayed
 import time
-
+os.add_dll_directory("C:\\Program Files\\SciTools\\bin\\pc-win64\\")
+sys.path.append("C:\\Program Files\\SciTools\\bin\\pc-win64\\python")
 import understand as und
 
 from codart.metrics import metrics_names
@@ -35,11 +39,11 @@ from codart.metrics.metrics_coverability import UnderstandUtility
 
 scaler1 = joblib.load(
     os.path.join(os.path.dirname(__file__),
-                 '../test_effectiveness/sklearn_models_nodes_regress/DS07710_scaler.joblib')
+                 'C:/Users/98910/Desktop/dataset/DS07710_scaler.joblib')
 )
 model5 = joblib.load(
     os.path.join(os.path.dirname(__file__),
-                 '../test_effectiveness/sklearn_models_nodes_regress/VR1_DS7.joblib')
+                 'C:/Users/98910/Desktop/dataset/VoR1_DS2.joblib')
 )
 
 
@@ -274,10 +278,11 @@ class TestabilityMetrics:
         return class_metrics
 
 
-def do(class_entity_long_name, project_db_path):
-    import understand as und
-    db = und.open(project_db_path)
+def do(class_entity_long_name, db):
     class_entity = UnderstandUtility.get_class_entity_by_name(class_name=class_entity_long_name, db=db)
+    if class_entity is None:
+        return None
+
     one_class_metrics_value = [class_entity.longname()]
 
     # print('Calculating package metrics')
@@ -304,8 +309,6 @@ def do(class_entity_long_name, project_db_path):
     one_class_metrics_value.extend([package_metrics_dict[metric_name] for
                                     metric_name in TestabilityMetrics.get_package_metrics_names()])
 
-    db.close()
-    del db
     # print(one_class_metrics_value)
     # quit()
     return one_class_metrics_value
@@ -329,29 +332,27 @@ class PreProcess:
         # class_entities = cls.read_project_classes(db=db, classes_names_list=class_list, )
         # print(project_db_path)
         db = und.open(project_db_path)
-        class_list = UnderstandUtility.get_project_classes_longnames_java(db=db)
-        db.close()
-        # del db
+        try:
+            class_list = UnderstandUtility.get_project_classes_longnames_java(db=db)
 
-        if n_jobs == 0:  # Sequential computing
-            res = [do(class_entity_long_name, project_db_path) for class_entity_long_name in class_list]
-        else:  # Parallel computing
-            res = Parallel(n_jobs=n_jobs, )(
-                delayed(do)(class_entity_long_name, project_db_path) for class_entity_long_name in class_list
-            )
-        res = list(filter(None, res))
+            results = []
+            for i, class_name in enumerate(class_list):
+                if i % 100 == 0:
+                    print(f"[INFO] Processed {i}/{len(class_list)} classes...")
+                    gc.collect()  # <-- CRITICAL
 
-        columns = ['Class']
-        columns.extend(TestabilityMetrics.get_all_primary_metrics_names())
-        # print('*' * 50)
-        # print(len(columns), columns)
-        # print('*' * 50)
+                res = do(class_name, db)
+                if res is not None:
+                    results.append(res)
 
-        df = pd.DataFrame(data=res, columns=columns)
-        # print('df for class {0} with shape {1}'.format(project_name, df.shape))
-        # df.to_csv(csv_path + project_name + '.csv', index=False)
-        # print(df)
-        return df
+            columns = ['Class']
+            columns.extend(TestabilityMetrics.get_all_primary_metrics_names())
+            df = pd.DataFrame(data=results, columns=columns)
+            return df
+
+        finally:
+            db.close()
+            gc.collect()
 
 
 class TestabilityModel:
@@ -409,8 +410,8 @@ def main(project_db_path, initial_value=1.0, verbose=False, log_path=None):
 
 # Test module
 if __name__ == '__main__':
-    db_path_ = r'E:/LSSDS/CodART/Experimental1/udbs/jvlt-1.3.2.und'  # This path should be replaced for each project
-    project_name_ = 'jvlt-1.3.2'
+    db_path_ = r'F:\benchmarks-proposal\java-corpus\bcel-5.2\bcel-5.2.und'  # This path should be replaced for each project
+    project_name_ = 'bcel-5.2'
 
     log_path_ = os.path.join(os.path.dirname(__file__), project_name_ + '_testability_s2.csv')
 

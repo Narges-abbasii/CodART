@@ -23,18 +23,24 @@ __version__ = '0.2.3'
 __author__ = 'Morteza Zakeri'
 
 import os
+import sys
+import gc
+import traceback
+import time
+
 import pandas as pd
 import joblib
 from joblib import Parallel, delayed
-
+os.add_dll_directory("C:\\Program Files\\SciTools\\bin\\pc-win64\\")
+sys.path.append("C:\\Program Files\\SciTools\\bin\\pc-win64\\python")
 import understand as und
 
 from codart import config
 from codart.metrics import metrics_names
 from codart.metrics.metrics_coverability import UnderstandUtility
 
-# scaler1 = joblib.load(os.path.join(os.path.dirname(__file__), 'data_model/DS07510.joblib'))
-# model5 = joblib.load(os.path.join(os.path.dirname(__file__), 'data_model/VR1_DS5.joblib'))
+scaler1 = joblib.load(os.path.join(os.path.dirname(__file__), 'data_model/DS07510.joblib'))
+model5 = joblib.load(os.path.join(os.path.dirname(__file__), 'data_model/VR1_DS5.joblib'))
 # model_branch = joblib.load(os.path.join(os.path.dirname(__file__), 'sklearn_models6/VR6_DS5_branch.joblib'))
 # model_line = joblib.load(os.path.join(os.path.dirname(__file__), 'sklearn_models6/VR6_DS5_line.joblib'))
 
@@ -314,41 +320,73 @@ class TestabilityMetrics:
         return class_metrics
 
 
-def do(class_entity_long_name, project_db_path):
-    import understand as und
-    db = und.open(project_db_path)
-    class_entity = UnderstandUtility.get_class_entity_by_name(class_name=class_entity_long_name, db=db)
-    one_class_metrics_value = [class_entity.longname()]
+def do_with_db(class_entity_long_name, db):
+    """Process a single class using an already-open Understand DB (sequential mode)."""
+    try:
+        class_entity = UnderstandUtility.get_class_entity_by_name(class_name=class_entity_long_name, db=db)
+        if class_entity is None:
+            return None
 
-    # print('Calculating package metrics')
-    package_metrics_dict = TestabilityMetrics.compute_java_package_metrics(db=db, entity=class_entity)
-    if package_metrics_dict is None or len(package_metrics_dict) == 0:
+        one_class_metrics_value = [class_entity.longname()]
+
+        package_metrics_dict = TestabilityMetrics.compute_java_package_metrics(db=db, entity=class_entity)
+        if not package_metrics_dict:
+            return None
+
+        # Lexicon metrics may be expensive; still compute if you need them
+        class_lexicon_metrics_dict = TestabilityMetrics.compute_java_class_metrics_lexicon(entity=class_entity)
+        if class_lexicon_metrics_dict is None:
+            return None
+
+        class_ordinary_metrics_dict = TestabilityMetrics.compute_java_class_metrics2(db=db, entity=class_entity)
+        if class_ordinary_metrics_dict is None:
+            return None
+
+        one_class_metrics_value.extend([package_metrics_dict[metric_name] for
+                                        metric_name in TestabilityMetrics.get_package_metrics_names()])
+
+        one_class_metrics_value.extend([class_lexicon_metrics_dict[metric_name] for
+                                        metric_name in TestabilityMetrics.get_class_lexicon_metrics_names()])
+
+        one_class_metrics_value.extend([class_ordinary_metrics_dict[metric_name] for
+                                        metric_name in TestabilityMetrics.get_class_ordinary_metrics_names()])
+
+        return one_class_metrics_value
+
+    except Exception:
+        traceback.print_exc()
         return None
+    finally:
+        # Help Python release references to Understand objects quickly
+        try:
+            del class_entity
+        except Exception:
+            pass
+        gc.collect()
 
-    # print('Calculating class lexicon metrics')
-    class_lexicon_metrics_dict = TestabilityMetrics.compute_java_class_metrics_lexicon(entity=class_entity)
-    if class_lexicon_metrics_dict is None or len(class_lexicon_metrics_dict) == 0:
-        return None
 
-    # print('Calculating class ordinary metrics')
-    class_ordinary_metrics_dict = TestabilityMetrics.compute_java_class_metrics2(db=db, entity=class_entity)
-    if class_ordinary_metrics_dict is None or len(class_ordinary_metrics_dict) == 0:
-        return None
+def do_worker(class_entity_long_name, project_db_path):
+    """
+    Worker used in parallel mode. Each worker opens/closes the DB itself.
+    This avoids sharing Understand objects between processes.
+    """
+    db = None
+    try:
+        try:
+            db = und.open(project_db_path, readonly=True, cache=False)
+        except TypeError:
+            db = und.open(project_db_path)
 
-    one_class_metrics_value.extend([package_metrics_dict[metric_name] for
-                                    metric_name in TestabilityMetrics.get_package_metrics_names()])
+        return do_with_db(class_entity_long_name, db)
 
-    one_class_metrics_value.extend([class_lexicon_metrics_dict[metric_name] for
-                                    metric_name in TestabilityMetrics.get_class_lexicon_metrics_names()])
-
-    one_class_metrics_value.extend([class_ordinary_metrics_dict[metric_name] for
-                                    metric_name in TestabilityMetrics.get_class_ordinary_metrics_names()])
-
-    db.close()
-    del db
-    # print(one_class_metrics_value)
-    # quit()
-    return one_class_metrics_value
+    finally:
+        try:
+            if db:
+                db.close()
+        except Exception:
+            pass
+        del db
+        gc.collect()
 
 
 # ------------------------------------------------------------------------
@@ -362,31 +400,64 @@ class PreProcess:
     @classmethod
     def compute_metrics_by_class_list(cls, project_db_path, n_jobs):
         """
-
-
+        Safe compute: sequential (n_jobs==0) opens DB once and reuse it.
+        Parallel (n_jobs>0) uses do_worker where each process opens its DB.
         """
+        # First open DB to get class list (readonly + cache=False if available)
+        try:
+            db = und.open(project_db_path, readonly=True, cache=False)
+        except TypeError:
+            db = und.open(project_db_path)
 
-        # class_entities = cls.read_project_classes(db=db, classes_names_list=class_list, )
-        # print(project_db_path)
-        db = und.open(project_db_path)
-        class_list = UnderstandUtility.get_project_classes_longnames_java(db=db)
-        db.close()
-        # del db
+        try:
+            class_list = UnderstandUtility.get_project_classes_longnames_java(db=db)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+            del db
+            gc.collect()
 
-        if n_jobs == 0:  # Sequential computing
-            res = [do(class_entity_long_name, project_db_path) for class_entity_long_name in class_list]
-        else:  # Parallel computing
-            res = Parallel(n_jobs=n_jobs, )(
-                delayed(do)(class_entity_long_name, project_db_path) for class_entity_long_name in class_list
+        if not class_list:
+            return pd.DataFrame(columns=['Class'] + TestabilityMetrics.get_all_primary_metrics_names())
+
+        if n_jobs == 0:
+            # Sequential: open DB once and reuse
+            try:
+                db_seq = und.open(project_db_path, readonly=True, cache=False)
+            except TypeError:
+                db_seq = und.open(project_db_path)
+
+            results = []
+            try:
+                total = len(class_list)
+                for i, class_entity_long_name in enumerate(class_list, start=1):
+                    if i % 100 == 0:
+                        print(f"[INFO] Processed {i}/{total} classes - running gc.collect()")
+                        gc.collect()
+
+                    r = do_with_db(class_entity_long_name, db_seq)
+                    if r:
+                        results.append(r)
+            finally:
+                try:
+                    db_seq.close()
+                except Exception:
+                    pass
+                del db_seq
+                gc.collect()
+        else:
+            # Parallel: each worker handles opening/closing DB
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(do_worker)(class_entity_long_name, project_db_path) for class_entity_long_name in class_list
             )
-        res = list(filter(None, res))
+            # results may contain None entries
+            results = list(filter(None, results))
 
         columns = ['Class']
         columns.extend(TestabilityMetrics.get_all_primary_metrics_names())
-        df = pd.DataFrame(data=res, columns=columns)
-        # print('df for class {0} with shape {1}'.format(project_name, df.shape))
-        # df.to_csv(csv_path + project_name + '.csv', index=False)
-        # print(df)
+        df = pd.DataFrame(data=results, columns=columns)
         return df
 
 
@@ -400,8 +471,8 @@ class TestabilityModel:
     def __init__(self, ):
         self.scaler = scaler1
         self.model = model5
-        self.model_branch = model_branch
-        self.model_line = model_line
+        # self.model_branch = model_branch
+        # self.model_line = model_line
 
     def inference(self, df_predict_data=None, verbose=False, log_path=None):
         df_predict_data = df_predict_data.fillna(0)
@@ -409,14 +480,14 @@ class TestabilityModel:
         X_test = self.scaler.transform(X_test1)
         y_pred = self.model.predict(X_test)
 
-        y_pred_branch = self.model_branch.predict(X_test)
-        y_pred_line = self.model_line.predict(X_test)
+        # y_pred_branch = self.model_branch.predict(X_test)
+        # y_pred_line = self.model_line.predict(X_test)
 
         df_new = pd.DataFrame(df_predict_data.iloc[:, 0], columns=['Class'])
         df_new['PredictedTestability'] = list(y_pred)
 
-        df_new['BranchCoverage'] = list(y_pred_branch)
-        df_new['LineCoverage'] = list(y_pred_line)
+        # df_new['BranchCoverage'] = list(y_pred_branch)
+        # df_new['LineCoverage'] = list(y_pred_line)
 
         if verbose:
             self.export_class_testability_values(df=df_new, log_path=log_path)
@@ -440,8 +511,9 @@ class TestabilityModel:
         df.to_csv(log_path, index=False)
 
 
+
 # API
-def main(project_db_path, initial_value=1.0, verbose=False, log_path=None):
+def main(project_db_path, initial_value=1.0, verbose=False, log_path=None, n_jobs=0):
     """
 
     testability_prediction module API
@@ -450,7 +522,7 @@ def main(project_db_path, initial_value=1.0, verbose=False, log_path=None):
 
     df = PreProcess().compute_metrics_by_class_list(
         project_db_path,
-        n_jobs=0  # n_job must be set to number of CPU cores, use zero for non-parallel computing of metrics
+        n_jobs=n_jobs  # n_job must be set to number of CPU cores, use zero for non-parallel computing of metrics
     )
     testability_ = TestabilityModel().inference(df_predict_data=df, verbose=verbose, log_path=log_path)
     # print('testability=', testability_)
@@ -463,6 +535,8 @@ if __name__ == '__main__':
     # project_path_ = r'../benchmark_projects/JSON/JSON.und'  # T=0.4531
     # project_path_ = r'D:/IdeaProjects/JSON20201115/JSON20201115.und'  # T=0.4749
     # project_path_ = r'D:/IdeaProjects/jvlt-1.3.2/src.und'  # T=0.3997
-    print(f"UDB path: {config.UDB_PATH}")
+    project_path_ = r'F:\benchmarks-proposal\java-corpus\bcel-5.2\bcel-5.2.und'
+    # print(f"UDB path: {config.UDB_PATH}")
     for i in range(0, 1):
-        print('mean testability2 normalize by 1\t', main(config.UDB_PATH, initial_value=1.0, verbose=False))
+        # print('mean testability2 normalize by 1\t', main(config.UDB_PATH, initial_value=1.0, verbose=False))
+        print('mean testability2 normalize by 1\t', main(project_path_, initial_value=1.0, verbose=False))
